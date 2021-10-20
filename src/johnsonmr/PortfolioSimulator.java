@@ -4,29 +4,77 @@ import java.math.BigDecimal;
 import java.math.MathContext;
 import java.math.RoundingMode;
 import java.sql.Connection;
+import java.sql.Date;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-public class PortfolioSimulator {
-    private static final String TABLE_NAME = "Analysis", COMMON_COLUMN_NAME = "_Cumulative_Return";
+import static johnsonmr.QueryFactory.CUMULATIVE_RETURN_COLUMN_NAME;
 
-    private static final int MAX_PRECISION = 2;
+public class PortfolioSimulator {
+    private static final int MAX_PRECISION = 3;
 
     private final Stock[] stockOrder;
+    private final Connection connection;
     private final List<PortfolioRecord> portfolioRecords;
     private final List<SpyRecord> spyRecords;
 
     public PortfolioSimulator(Connection connection, Stock[] stockOrder) {
         this.stockOrder = stockOrder;
+        this.connection = connection;
         portfolioRecords = new ArrayList<>();
         spyRecords = new ArrayList<>();
-        selectAllSPYRecords(connection);
-        selectAllStockRecords(connection);
+        selectAllSPYRecords();
+        selectAllStockRecords();
+    }
+
+    private void selectAllStockRecords() {
+        String query = QueryFactory.buildSelectStockRecords(stockOrder);
+
+        try (Statement statement = connection.createStatement();
+             ResultSet results = statement.executeQuery(query)) {
+
+            while (results.next()) {
+                BigDecimal[] stockCumulativeReturns = new BigDecimal[stockOrder.length];
+                for (int i = 0; i < stockOrder.length; i++) {
+                    String columnName = stockOrder[i].name() + CUMULATIVE_RETURN_COLUMN_NAME;
+                    stockCumulativeReturns[i] = new BigDecimal(results.getString(columnName));
+                }
+
+                PortfolioRecord temp = new PortfolioRecord(
+                        Date.valueOf(results.getString("date")),
+                        stockCumulativeReturns
+                );
+                portfolioRecords.add(temp);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            System.exit(0);
+        }
+    }
+
+    private void selectAllSPYRecords() {
+        String columnName = "SPY" + CUMULATIVE_RETURN_COLUMN_NAME;
+
+        String query = QueryFactory.buildSelectSPYRecords(columnName);
+        try (Statement statement = connection.createStatement();
+             ResultSet results = statement.executeQuery(query)) {
+
+            while (results.next()) {
+                SpyRecord temp = new SpyRecord(
+                        Date.valueOf(results.getString("date")),
+                        new BigDecimal(results.getString(columnName))
+                );
+                spyRecords.add(temp);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            System.exit(0);
+        }
     }
 
     public BigDecimal[] executeOptimization() {
@@ -38,7 +86,7 @@ public class PortfolioSimulator {
             setAllocations(currentAllocations);
 
             BigDecimal[] portfolioDailyValues = createPortfolioDailyValues();
-            BigDecimal[] portfolioBenchmarkDifferences = createDailyDifferences(portfolioDailyValues);
+            BigDecimal[] portfolioBenchmarkDifferences = calculateDifferenceValues(portfolioDailyValues);
 
             BigDecimal average = calculateAverage(portfolioBenchmarkDifferences);
             BigDecimal standardDeviation = calculateStandardDeviation(portfolioBenchmarkDifferences);
@@ -88,7 +136,9 @@ public class PortfolioSimulator {
 
     public BigDecimal[] executeSingleRun() {
         BigDecimal[] portfolioDailyValues = createPortfolioDailyValues();
-        BigDecimal[] portfolioBenchmarkDifferences = createDailyDifferences(portfolioDailyValues);
+        BigDecimal[] portfolioBenchmarkDifferences = calculateDifferenceValues(portfolioDailyValues);
+
+        updateDatabaseValues(portfolioDailyValues, portfolioBenchmarkDifferences);
 
         BigDecimal average = calculateAverage(portfolioBenchmarkDifferences);
         BigDecimal standardDeviation = calculateStandardDeviation(portfolioBenchmarkDifferences);
@@ -102,31 +152,18 @@ public class PortfolioSimulator {
         return new BigDecimal[]{average, standardDeviation, sharpeRatio, overallCumulativeReturn};
     }
 
-    private void selectAllStockRecords(Connection connection) {
-        StringBuilder query = new StringBuilder("SELECT date, ");
+    private void updateDatabaseValues(BigDecimal[] portfolioDailyValues, BigDecimal[] portfolioBenchmarkDifferences) {
+        final String query = QueryFactory.buildInsertQuery(stockOrder);
 
-        for (int i = 0; i < stockOrder.length; i++) {
-            query.append(stockOrder[i].name()).append(COMMON_COLUMN_NAME);
-            if (i != stockOrder.length - 1)
-                query.append(", ");
-        }
-        query.append(" FROM ").append(TABLE_NAME);
-
-        try (Statement statement = connection.createStatement();
-             ResultSet results = statement.executeQuery(query.toString())) {
-
-            while (results.next()) {
-                BigDecimal[] stockCumulativeReturns = new BigDecimal[stockOrder.length];
-                for (int i = 0; i < stockOrder.length; i++) {
-                    String columnName = stockOrder[i].name() + COMMON_COLUMN_NAME;
-                    stockCumulativeReturns[i] = new BigDecimal(results.getString(columnName));
-                }
-
-                PortfolioRecord temp = new PortfolioRecord(
-                        LocalDate.parse(results.getString("date")),
-                        stockCumulativeReturns
+        try {
+            for (int i = 0; i < portfolioRecords.size(); i++) {
+                updateSingleRecord(
+                        query,
+                        portfolioRecords.get(i),
+                        spyRecords.get(i).spyCumulativeReturn(),
+                        portfolioDailyValues[i],
+                        portfolioBenchmarkDifferences[i]
                 );
-                portfolioRecords.add(temp);
             }
         } catch (SQLException e) {
             e.printStackTrace();
@@ -134,30 +171,26 @@ public class PortfolioSimulator {
         }
     }
 
-    private void selectAllSPYRecords(Connection connection) {
-        String columnName = "SPY" + COMMON_COLUMN_NAME;
-
-        try (Statement statement = connection.createStatement();
-             ResultSet results = statement.executeQuery("SELECT date, " + columnName + " FROM " + TABLE_NAME)) {
-
-            while (results.next()) {
-                SpyRecord temp = new SpyRecord(
-                        LocalDate.parse(results.getString("date")),
-                        new BigDecimal(results.getString(columnName))
-                );
-                spyRecords.add(temp);
-            }
-        } catch (SQLException e) {
-            e.printStackTrace();
-            System.exit(0);
+    private void updateSingleRecord(String query, PortfolioRecord portfolioRecord, BigDecimal spyRecordCumulativeReturn,
+                                    BigDecimal totalPortfolioValue, BigDecimal portfolioBenchmarkDifference) throws SQLException {
+        PreparedStatement preparedStatement = connection.prepareStatement(query);
+        for (int i = 0; i < stockOrder.length; i++) {
+            BigDecimal temp = portfolioRecord.calculateSingleStockReturns(i, stockOrder);
+            preparedStatement.setString(i + 1, "$" + temp.round(new MathContext(2)));
         }
+        preparedStatement.setString(5, "$" + spyRecordCumulativeReturn);
+        preparedStatement.setBigDecimal(6, totalPortfolioValue);
+        preparedStatement.setString(7, "$" + totalPortfolioValue);
+        preparedStatement.setBigDecimal(8, portfolioBenchmarkDifference);
+        preparedStatement.setDate(9, portfolioRecord.day());
+        preparedStatement.executeUpdate();
     }
 
     private BigDecimal[] createPortfolioDailyValues() {
         BigDecimal[] dailyValues = new BigDecimal[portfolioRecords.size()];
 
         for (int i = 0; i < portfolioRecords.size(); i++) {
-            BigDecimal result = portfolioRecords.get(i).calculateDailyReturns(stockOrder);
+            BigDecimal result = portfolioRecords.get(i).calculateTotalDailyReturns(stockOrder);
             int precision = result.compareTo(BigDecimal.ONE) > 0 ? 3 : 2;
             dailyValues[i] = result.round(new MathContext(precision));
         }
@@ -165,7 +198,7 @@ public class PortfolioSimulator {
         return dailyValues;
     }
 
-    private BigDecimal[] createDailyDifferences(BigDecimal[] portfolioDailyValues) {
+    private BigDecimal[] calculateDifferenceValues(BigDecimal[] portfolioDailyValues) {
         BigDecimal[] differences = new BigDecimal[spyRecords.size()];
 
         for (int i = 0; i < spyRecords.size(); i++) {
@@ -198,13 +231,13 @@ public class PortfolioSimulator {
         BigDecimal sum = BigDecimal.ZERO, standardDeviation = BigDecimal.ZERO;
         int length = portfolioBenchmarkDifferences.length;
 
-        for(BigDecimal difference : portfolioBenchmarkDifferences) {
+        for (BigDecimal difference : portfolioBenchmarkDifferences) {
             sum = sum.add(difference);
         }
 
         BigDecimal mean = sum.divide(BigDecimal.valueOf(length), RoundingMode.HALF_UP);
 
-        for(BigDecimal difference : portfolioBenchmarkDifferences) {
+        for (BigDecimal difference : portfolioBenchmarkDifferences) {
             BigDecimal temp = difference
                     .subtract(mean)
                     .pow(2);

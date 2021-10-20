@@ -1,18 +1,22 @@
 package johnsonmr;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.sql.Date;
 
-public record PortfolioRecord(LocalDate day, BigDecimal[] cumulativeReturns) {
-    public BigDecimal calculateDailyReturns(Stock[] stockOrder) {
+public record PortfolioRecord(Date day, BigDecimal[] cumulativeReturns) {
+    public BigDecimal calculateTotalDailyReturns(Stock[] stockOrder) {
         BigDecimal result = BigDecimal.ZERO;
 
         for (int stockIndex = 0; stockIndex < stockOrder.length; stockIndex++) {
-            BigDecimal temp = cumulativeReturns[stockIndex];
-            temp = temp.multiply(BigDecimal.valueOf(stockOrder[stockIndex].getAllocation()));
+            BigDecimal temp = calculateSingleStockReturns(stockIndex, stockOrder);
             result = result.add(temp);
         }
 
         return result;
+    }
+
+    public BigDecimal calculateSingleStockReturns(int index, Stock[] stockOrder) {
+        BigDecimal temp = cumulativeReturns[index];
+        return temp.multiply(BigDecimal.valueOf(stockOrder[index].getAllocation()));
     }
 }

@@ -1,7 +1,7 @@
 package johnsonmr;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.sql.Date;
 
-public record SpyRecord(LocalDate day, BigDecimal spyCumulativeReturn) {
+public record SpyRecord(Date day, BigDecimal spyCumulativeReturn) {
 }
